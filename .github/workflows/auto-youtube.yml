@@ -2,8 +2,8 @@ name: 24/Day Random YouTube Uploader
 
 on:
   schedule:
-    # हर 1 घंटे में गिटहब जॉब स्टार्ट करेगा (दिन की 24 जॉब)
-    - cron: '0 * * * *'
+    # हर 2 घंटे में गिटहब जॉब स्टार्ट करेगा (दिन की 12 जॉब)
+    - cron: '0 */2 * * *'
   workflow_dispatch: 
 
 jobs:
