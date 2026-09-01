@@ -1,0 +1,265 @@
+import os
+import random
+import time
+import json
+import asyncio
+import sys
+import numpy as np
+
+# 🛠️ MoviePy PIL Error Fix (100% Safe)
+from PIL import Image
+if not hasattr(Image, 'ANTIALIAS'):
+    Image.ANTIALIAS = Image.LANCZOS
+
+# ⏱️ RANDOM WAIT SYSTEM (0 से 25 मिनट रुकेगा)
+wait_seconds = random.randint(0, 1500)
+print(f"🤖 GitHub Server चालू! वीडियो रेंडर करने से पहले {wait_seconds // 60} मिनट का रैंडम इंतज़ार कर रहा है...")
+time.sleep(wait_seconds)
+print("▶️ इंतज़ार ख़त्म! अब वीडियो बनाने का काम शुरू...")
+
+# ==========================================
+import edge_tts
+from gtts import gTTS
+from moviepy.editor import AudioFileClip, TextClip, ImageClip, CompositeVideoClip, CompositeAudioClip
+from moviepy.audio.AudioClip import AudioClip
+
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.auth.transport.requests import Request
+from googleapiclient.errors import HttpError
+
+OUTPUT_FOLDER = "./output"
+TEMP_FOLDER = "./temp"
+JSON_FILE_PATH = "./questions.json"
+TOKENS_FOLDER = "./tokens"  
+BG_IMAGE_PATH = "./bg_template.jpg" # 🌟 आपकी नई डिज़ाइन वाली फोटो
+HINDI_FONT = "./NirmalaB.ttf" # 🌟 गिटहब पर मौजूद फॉन्ट फाइल
+
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+os.makedirs(TEMP_FOLDER, exist_ok=True)
+
+# 🚀 जो सवाल यूज़ होगा, वो डिलीट हो जाएगा
+def get_quiz_data():
+    with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
+        questions_list = json.load(f)
+        
+    if len(questions_list) == 0:
+        print("❌ सारे सवाल ख़त्म हो गए हैं! कृपया questions.json में नए सवाल डालें।")
+        sys.exit(1)
+
+    # रैंडम सवाल चुनो
+    selected_quiz = random.choice(questions_list)
+    
+    # उस सवाल को लिस्ट से हटा दो (Delete)
+    questions_list.remove(selected_quiz)
+    
+    # बची हुई लिस्ट को वापस JSON में सेव कर दो
+    with open(JSON_FILE_PATH, 'w', encoding='utf-8') as f:
+        json.dump(questions_list, f, ensure_ascii=False, indent=4)
+        
+    print(f"🗑️ सवाल इस्तेमाल हो गया, अब इसे JSON से डिलीट कर दिया गया है। बचे हुए सवाल: {len(questions_list)}")
+    return selected_quiz
+
+async def generate_voice(text, filename):
+    filepath = os.path.join(TEMP_FOLDER, filename)
+    try:
+        # 🚀 आवाज़ की स्पीड +20% (ताकि ऑडियंस बोर न हो)
+        communicate = edge_tts.Communicate(text, "hi-IN-MadhurNeural", rate="+20%", volume="+50%")
+        await communicate.save(filepath)
+        return filepath
+    except:
+        tts = gTTS(text=text, lang='hi', slow=False)
+        tts.save(filepath)
+        return filepath
+
+def make_pop_sfx():
+    return AudioClip(lambda t: np.vstack([np.sin(2 * np.pi * 400 * t) * np.exp(-30 * t)]*2).T, duration=0.2, fps=44100).volumex(1.5)
+
+def make_tick_sfx(duration=5.0):
+    def sound_wave(t):
+        t_mod = t % 1.0
+        click = np.sin(2 * np.pi * 1000 * t_mod) * np.exp(-60 * t_mod)
+        return np.where(t_mod < 0.1, click, 0)
+    return AudioClip(lambda t: np.vstack([sound_wave(t), sound_wave(t)]).T, duration=duration, fps=44100).volumex(3.0)
+
+def make_ding_sfx():
+    return AudioClip(lambda t: np.vstack([np.sin(2 * np.pi * 800 * t) * np.exp(-5 * t)]*2).T, duration=1.5, fps=44100).volumex(1.5)
+
+def upload_to_youtube(video_file, quiz_question):
+    print("🌐 YouTube सर्वर से कनेक्ट हो रहा है...")
+    
+    if not os.path.exists(TOKENS_FOLDER):
+        print("❌ Tokens फोल्डर ही नहीं मिला!")
+        return False
+
+    token_files = sorted([os.path.join(TOKENS_FOLDER, f) for f in os.listdir(TOKENS_FOLDER) if f.endswith('.json')])
+    
+    if not token_files:
+        print("❌ कोई Token नहीं मिला! GitHub Secrets चेक करें।")
+        return False
+
+    yt_title = f"{quiz_question} 🤔 | GK Quiz In Hindi | #shorts #gk"
+    yt_desc = "क्या आपको इसका सही जवाब पता था? कमेंट करके ज़रूर बताएं! 👇\n#gkquiz #hindigk #shorts #education"
+    yt_tags = ["gk shorts", "hindi gk", "quiz", "education shorts"]
+
+    request_body = {
+        "snippet": {"title": yt_title, "description": yt_desc, "tags": yt_tags, "categoryId": "27"},
+        "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False}
+    }
+
+    uploaded = False
+
+    for token_path in token_files:
+        try:
+            print(f"🔑 Try कर रहा है: {os.path.basename(token_path)} ...")
+            creds = Credentials.from_authorized_user_file(token_path, ["https://www.googleapis.com/auth/youtube.upload"])
+            
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(token_path, 'w') as token_file:
+                    token_file.write(creds.to_json())
+                    
+            youtube = build('youtube', 'v3', credentials=creds)
+            media = MediaFileUpload(video_file, chunksize=-1, resumable=True)
+            
+            request = youtube.videos().insert(part="snippet,status", body=request_body, media_body=media)
+            response = request.execute()
+            
+            print(f"✅ तहलका! वीडियो LIVE हो गया: https://youtu.be/{response['id']}")
+            uploaded = True
+            break
+            
+        except HttpError as e:
+            if 'quotaExceeded' in str(e):
+                print(f"⚠️ {os.path.basename(token_path)} की लिमिट ख़त्म! अगले टोकन पर जा रहा है...")
+                continue
+            else:
+                print(f"❌ अपलोड एरर: {e}")
+                break
+
+    if not uploaded:
+        print("❌ सारे टोकन की लिमिट ख़त्म हो गई है!")
+        return False
+    return True
+
+async def make_one_video():
+    quiz = get_quiz_data()
+    print(f"\n✨ सवाल चुना गया: {quiz['question']}")
+    
+    # 🧹 टेक्स्ट को साफ़ करना (A, B, C हटाना)
+    text_a = quiz['opt_a'].replace("A)", "").replace("A.", "").strip()
+    text_b = quiz['opt_b'].replace("B)", "").replace("B.", "").strip()
+    text_c = quiz['opt_c'].replace("C)", "").replace("C.", "").strip()
+
+    correct_key = quiz['correct_key']
+    if correct_key == 'A': correct_ans_text = text_a
+    elif correct_key == 'B': correct_ans_text = text_b
+    else: correct_ans_text = text_c
+
+    # 🎙️ सीधा और फ़ास्ट बोलने के लिए स्क्रिप्ट तैयार
+    speech_q = quiz['question']
+    speech_a = f"ए, {text_a}"
+    speech_b = f"बी, {text_b}"
+    speech_c = f"सी, {text_c}"
+    speech_ans = f"सही जवाब है, {correct_ans_text}"
+
+    q_path = await generate_voice(speech_q, "q.mp3")
+    a_path = await generate_voice(speech_a, "a.mp3")
+    b_path = await generate_voice(speech_b, "b.mp3")
+    c_path = await generate_voice(speech_c, "c.mp3")
+    ans_path = await generate_voice(speech_ans, "ans.mp3")
+
+    aud_q = AudioFileClip(q_path).volumex(1.5)
+    aud_a = AudioFileClip(a_path).volumex(1.5)
+    aud_b = AudioFileClip(b_path).volumex(1.5)
+    aud_c = AudioFileClip(c_path).volumex(1.5)
+    aud_ans = AudioFileClip(ans_path).volumex(1.5)
+
+    # ⏱️ Timing Logic 
+    t = 0.0
+    s_q = t; t += aud_q.duration + 0.2
+    s_a = t; t += aud_a.duration + 0.2
+    s_b = t; t += aud_b.duration + 0.2
+    s_c = t; t += aud_c.duration + 0.3
+    timer_dur = 5.0
+    s_timer = t; t += timer_dur
+    s_ans = t; t += aud_ans.duration + 1.0
+    total = t
+
+    # 🌟 बैकग्राउंड इमेज लोड करना
+    if not os.path.exists(BG_IMAGE_PATH):
+        print(f"❌ Error: {BG_IMAGE_PATH} नहीं मिली! GitHub पर इमेज अपलोड करें।")
+        sys.exit(1)
+    bg = ImageClip(BG_IMAGE_PATH).resize((1080, 1920)).set_duration(total).set_fps(24)
+
+    # 🎯 1. QUESTION ALIGNMENT
+    q_clip = TextClip(quiz['question'], fontsize=75, color='white', font=HINDI_FONT, method='caption', size=(850, None), align='center').set_position(('center', 570)).set_start(s_q).set_duration(total - s_q)
+
+    # 🎯 2. A, B, C ALIGNMENT (गोलों के बीच में)
+    circle_x = 105 
+    y_a, y_b, y_c = 975, 1165, 1355 
+    lbl_a = TextClip("A", fontsize=80, color='black', font='Arial-Bold').set_position((circle_x, y_a)).set_start(s_a).set_duration(total - s_a)
+    lbl_b = TextClip("B", fontsize=80, color='black', font='Arial-Bold').set_position((circle_x, y_b)).set_start(s_b).set_duration(total - s_b)
+    lbl_c = TextClip("C", fontsize=80, color='black', font='Arial-Bold').set_position((circle_x, y_c)).set_start(s_c).set_duration(total - s_c)
+
+    # 🎯 3. OPTIONS ALIGNMENT (नीले बॉक्स के अंदर)
+    text_x = 280 
+    opt_a = TextClip(text_a, fontsize=70, color='white', font=HINDI_FONT).set_position((text_x, y_a)).set_start(s_a).set_duration(total - s_a)
+    opt_b = TextClip(text_b, fontsize=70, color='white', font=HINDI_FONT).set_position((text_x, y_b)).set_start(s_b).set_duration(total - s_b)
+    opt_c = TextClip(text_c, fontsize=70, color='white', font=HINDI_FONT).set_position((text_x, y_c)).set_start(s_c).set_duration(total - s_c)
+
+    pop_a = make_pop_sfx().set_start(s_a)
+    pop_b = make_pop_sfx().set_start(s_b)
+    pop_c = make_pop_sfx().set_start(s_c)
+
+    # 🎯 4. TIMER ALIGNMENT
+    timer_vis = []
+    colors = {5:'yellow', 4:'yellow', 3:'yellow', 2:'white', 1:'white'} 
+    for i in range(int(timer_dur)):
+        tl = int(timer_dur) - i
+        ts = s_timer + i
+        n = TextClip(f"{tl}", fontsize=120, color=colors.get(tl,'white'), font='Arial-Bold').set_position((520, 1535)).set_start(ts).set_duration(1.0)
+        timer_vis.append(n)
+
+    tick = make_tick_sfx(timer_dur).set_start(s_timer)
+
+    # ✅ Answer Highlight (Green)
+    ans_clip = None
+    ans_color = '#00FF00' 
+    if correct_key == 'A': 
+        ans_clip = TextClip(text_a, fontsize=70, color=ans_color, font=HINDI_FONT).set_position((text_x, y_a)).set_start(s_ans).set_duration(total - s_ans)
+    elif correct_key == 'B': 
+        ans_clip = TextClip(text_b, fontsize=70, color=ans_color, font=HINDI_FONT).set_position((text_x, y_b)).set_start(s_ans).set_duration(total - s_ans)
+    elif correct_key == 'C': 
+        ans_clip = TextClip(text_c, fontsize=70, color=ans_color, font=HINDI_FONT).set_position((text_x, y_c)).set_start(s_ans).set_duration(total - s_ans)
+
+    ding = make_ding_sfx().set_start(s_ans)
+    
+    # 🎬 Compile Everything
+    final_audio = CompositeAudioClip([aud_q.set_start(s_q), aud_a.set_start(s_a), pop_a, aud_b.set_start(s_b), pop_b, aud_c.set_start(s_c), pop_c, tick, ding, aud_ans.set_start(s_ans)])
+    visuals = [bg, q_clip, lbl_a, lbl_b, lbl_c, opt_a, opt_b, opt_c] + timer_vis
+    if ans_clip: visuals.append(ans_clip)
+
+    video = CompositeVideoClip(visuals).set_audio(final_audio)
+    out_path = os.path.join(OUTPUT_FOLDER, "short.mp4")
+    
+    print("🎬 वीडियो रेंडर हो रही है...")
+    video.write_videofile(out_path, codec="libx264", audio_codec="aac", fps=24, logger=None)
+    
+    for c in visuals: c.close()
+    video.close(); final_audio.close()
+    
+    success = upload_to_youtube(out_path, quiz['question'])
+    
+    # Cleanup
+    if os.path.exists(out_path): os.remove(out_path)
+    for f in os.listdir(TEMP_FOLDER): 
+        try: os.remove(os.path.join(TEMP_FOLDER, f))
+        except: pass
+    
+    if not success:
+        sys.exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(make_one_video())
